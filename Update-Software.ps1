@@ -7,8 +7,10 @@
     Visual Studio and LibreOffice when a newer version is available, then installs
     pending Windows updates via the Windows Update Agent COM API. If any
     Windows update requires a reboot, the script prompts the user and
-    restarts the machine once a key is pressed. Output is logged to
-    C:\scripts\logs\SoftwareUpdate.txt
+    restarts the machine once a key is pressed.
+
+    Nothing is written to disk: the task runs in a visible window, and a run
+    that reported a problem waits for a key press before the window closes.
 .NOTES
     winget (App Installer) ships with Windows 11 and requires an internet
     connection; when offline the check fails silently and is retried at
@@ -16,14 +18,10 @@
 #>
 
 $ErrorActionPreference = 'Continue'
-$LogDir = 'C:\scripts\logs'
-$null = New-Item -Path $LogDir -ItemType Directory -Force
-$LogFile = Join-Path $LogDir 'SoftwareUpdate.txt'
-# Simple rotation: start over once the log exceeds 1 MB.
-if ((Test-Path $LogFile) -and (Get-Item $LogFile).Length -gt 1MB) {
-    Remove-Item $LogFile -Force
-}
-Start-Transcript -Path $LogFile -Append
+
+# Counts the warnings of this run: without a log file they would be gone as
+# soon as the window closes, so the script keeps the window open if any occur.
+$Problems = 0
 
 # winget error codes that are expected during a routine check.
 $UPDATE_NOT_APPLICABLE = -1978335189   # no newer version available
@@ -65,7 +63,10 @@ foreach ($pkg in $packages) {
     switch ($LASTEXITCODE) {
         0                      { Write-Host "OK - $($pkg.Name) is up to date or was updated." }
         $UPDATE_NOT_APPLICABLE { Write-Host "OK - $($pkg.Name): no update available." }
-        default                { Write-Host "WARNING - $($pkg.Name): winget exit code $LASTEXITCODE" }
+        default                {
+            Write-Host "WARNING - $($pkg.Name): winget exit code $LASTEXITCODE"
+            $Problems++
+        }
     }
 }
 
@@ -104,6 +105,7 @@ try {
         for ($i = 0; $i -lt $toInstall.Count; $i++) {
             $code   = $installResult.GetUpdateResult($i).ResultCode
             $status = if ($code -in 2, 3) { 'OK' } else { "WARNING (result code $code)" }
+            if ($code -notin 2, 3) { $Problems++ }
             Write-Host "$status - $($toInstall.Item($i).Title)"
         }
 
@@ -113,19 +115,20 @@ try {
     # Typically no internet connection or the Windows Update service is
     # unavailable; the check is retried at the next logon.
     Write-Host "WARNING - Windows Update failed: $($_.Exception.Message)"
+    $Problems++
 }
 
-if ($RebootPending) {
-    Write-Host 'Reboot required - waiting for user confirmation.'
-}
-
-Stop-Transcript
-
-# Prompt after the transcript is closed so the log file is complete.
 # The script runs in a visible window, so the user can trigger the
 # reboot at a convenient moment by pressing any key.
 if ($RebootPending) {
+    Write-Host ''
     Write-Host 'Die Updates erfordern einen Neustart. Drücke eine Taste, um den PC neu zu starten.'
     $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
     shutdown.exe /r /t 0
+} elseif ($Problems -gt 0) {
+    # Nothing is written to disk, so the warnings above would be gone the
+    # moment the window closes. Keep it open until the user has seen them.
+    Write-Host ''
+    Write-Host "$Problems Warnung(en) - siehe oben. Drücke eine Taste, um das Fenster zu schließen."
+    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 }
